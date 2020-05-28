@@ -1,0 +1,3 @@
+[submodule "OCRDataset"]
+path = OCR_DataSet
+url = https://github.com/WenmuZhou/OCR_DataSet
