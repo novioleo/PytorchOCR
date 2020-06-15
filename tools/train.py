@@ -211,7 +211,66 @@ def get_data_loader(dataset_config):
     return train_loader, eval_loader
 
 
-def evaluate(net, val_loader, loss_func, to_use_device, logger, max_iter=50):
+def ctc_label_decode(_pred, _blank_index=0):
+    """
+    对当前预测序列进行ctc
+    :param _pred:
+    :param _blank_index:
+    :return:
+    """
+    to_return_result = []
+    new_pred_sequence = [_blank_index] + _pred
+    for m_char_1, m_char_2 in zip(_pred, new_pred_sequence):
+        if not (m_char_1 == 0 or m_char_1 == m_char_2):
+            to_return_result.append(m_char_1)
+    return to_return_result
+
+
+def remove_blank(_seq, _blank_index=0):
+    """
+    移除序列中的空字符
+    :param _seq:    待移除空字符序列
+    :param _blank_index:    空字符所在下标
+    :return:    移除了空字符的序列
+    """
+    ret = list(filter(lambda x: x != _blank_index, _seq))
+    return ret
+
+
+def accuracy_compute(_gt, _pred, _blank_index=0):
+    """
+    增加模型评估
+    :param _gt: 标注结果
+    :param _pred:   预测结果
+    :param _blank_index:    空字符所在下标
+    :return:    当前一个batch正确的数量
+    """
+    same_count = 0
+    for i in range(_pred.size(0)):
+        gt_without_blank = remove_blank(_gt[i].cpu().numpy().tolist(), _blank_index)
+        pred_ctc_decode = ctc_label_decode(_pred.cpu().numpy().tolist(), _blank_index)
+        if len(pred_ctc_decode) == len(gt_without_blank):
+            is_same = True
+            for k in range(len(pred_ctc_decode)):
+                if pred_ctc_decode[k] != gt_without_blank[k]:
+                    is_same = False
+                    break
+            if is_same:
+                same_count += 1
+    return same_count
+
+
+def evaluate(net, val_loader, loss_func, to_use_device, logger, _blank_index):
+    """
+    在验证集上面评估模型
+    :param net:     网络
+    :param val_loader:  验证集对应的dataloader
+    :param loss_func:   损失函数
+    :param to_use_device:   需要使用的设备
+    :param logger:  日志记录
+    :param _blank_index:    空字符的下标
+    :return:    评估结果（用dict保存）
+    """
     logger.info('start evaluate')
     net.eval()
     nums = 0
