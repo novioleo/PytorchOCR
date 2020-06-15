@@ -18,6 +18,8 @@ from torch import nn
 from torch.optim import SGD, Adam
 import traceback as tb
 
+from torch.optim.lr_scheduler import _LRScheduler
+
 from datasets.icdar15.ICDAR15RecDataset import RecDataLoader
 from utils import weight_init, init_logger
 
@@ -117,7 +119,7 @@ def load_model(_model, resume_from, to_use_device, _optimizers=None, third_name=
         _model.load_state_dict(state['state_dict'])
         if _optimizers is not None:
             assert len(_optimizers) == len(state['optimizer'])
-            for m_optimizer,m_optimizer_state_dict in zip(_optimizers,state['optimizer']):
+            for m_optimizer, m_optimizer_state_dict in zip(_optimizers, state['optimizer']):
                 m_optimizer.load_state_dict(m_optimizer_state_dict)
         start_epoch = state['epoch']
 
@@ -276,9 +278,7 @@ def evaluate(net, val_loader, loss_func, to_use_device, logger, _blank_index):
     nums = 0
     result_dict = {
         'eval_loss': 0.,
-        'recall': 0.,
         'precision': 0.,
-        'f1': 0.
     }
     with torch.no_grad():
         for batch_data in tqdm.tqdm(val_loader):
@@ -287,12 +287,10 @@ def evaluate(net, val_loader, loss_func, to_use_device, logger, _blank_index):
             output = net.forward(batch_data[0].to(to_use_device))
             loss = loss_func(output, batch_data[1:])
             # print('eval loss {}'.format(float(loss.item())))
-            result_dict['eval_loss'] += loss.item()*batch_data[0].size(0)
+            result_dict['eval_loss'] += loss.item() * batch_data[0].size(0)
             # res = cal_recognize_recall_precision_f1(output, batch_data[1:])
             #
-            # result_dict['recall'] += res['recall']
-            # result_dict['precision'] += res['precision']
-            # result_dict['f1'] += res['f1']
+            result_dict['precision'] += accuracy_compute(batch_data[1], output.argmax(2), _blank_index)
             # print('batch shape:{}'.format(batch_data[0].shape[0]))
             nums += batch_data[0].shape[0]
     logger.info(f'evaluate result:\n\t nums:{nums}')
@@ -300,7 +298,7 @@ def evaluate(net, val_loader, loss_func, to_use_device, logger, _blank_index):
     for key, val in result_dict.items():
         result_dict[key] = result_dict[key] / nums
         logger.info('\t {}:{}'.format(key, result_dict[key]))
-    return result_dict['eval_loss'], result_dict['recall'], result_dict['precision'], result_dict['f1']
+    return result_dict
 
 
 def save_checkpoint(checkpoint_path, model, _optimizers, epoch, logger):
@@ -341,7 +339,7 @@ def save_model_logic(total_loss, total_num, min_loss, net, solver, epoch, rec_tr
 
 
 def train(net, _solvers, schedulers, loss_func, train_loader, eval_loader, to_use_device,
-          rec_train_options,_epoch, logger):
+          rec_train_options, _epoch, logger, _blank_index):
     """
     训练
     Args:
@@ -351,10 +349,11 @@ def train(net, _solvers, schedulers, loss_func, train_loader, eval_loader, to_us
         loss_func: loss函数
         train_loader: 训练数据集dataloader
         eval_loader: 验证数据集dataloader
-        to_use_device:
-        rec_train_options:
+        to_use_device:  当前设备
+        rec_train_options:  训练的相关选项
         _epoch: 当前epoch
-        logger:
+        logger: 日志记录
+        _blank_index：   空字符所在的index
     Returns:
     """
 
@@ -365,10 +364,11 @@ def train(net, _solvers, schedulers, loss_func, train_loader, eval_loader, to_us
     num_in_print = 0
     all_step = len(train_loader)
     logger.info('train dataset has {} samples,{} in dataloader'.format(train_loader.__len__(), all_step))
-    best_model = {'eval_loss': 0, 'recall': 0, 'precision': 0, 'f1': 0, 'models': ''}
+    best_model = {'eval_loss': 0, 'precision': 0, 'models': ''}
     try:
-        for epoch in range(_epoch,rec_train_options['epochs']):  # traverse each epoch
-            current_lr = [m_scheduler.get_lr()[0] for m_scheduler in schedulers]
+        for epoch in range(_epoch, rec_train_options['epochs']):  # traverse each epoch
+            current_lr = [m_scheduler.get_lr()[0] if isinstance(m_scheduler, _LRScheduler) else 0 for m_scheduler in
+                          schedulers]
             net.train()  # train mode
             for i, batch_data in enumerate(train_loader):  # traverse each batch in the epoch
                 # clear the grad
@@ -395,38 +395,17 @@ def train(net, _solvers, schedulers, loss_func, train_loader, eval_loader, to_us
 
             if epoch >= rec_train_options['val_interval'] and epoch % rec_train_options['val_interval'] == 0:
                 # val
-                eval_loss, recall, precision, f1 = evaluate(net, eval_loader, loss_func, to_use_device, logger)
-                net_save_path = '{}/epoch_{}_eval_loss{:.6f}_r{:.6f}_p{:.6f}_f1{:.6f}.pth'.format(
-                    rec_train_options['checkpoint_save_dir'], epoch, eval_loss, recall, precision, f1)
-                # save_checkpoint(net_save_path, net, solver, epoch, logger)
-
+                eval_result = evaluate(net, eval_loader, loss_func, to_use_device, logger, _blank_index)
+                net_save_path = '{}/epoch_{}_eval_{}.pth'.format(
+                    rec_train_options['checkpoint_save_dir'], epoch,
+                    '_'.join(['[%s]%0.4f' % (m_key,m_value) for m_key, m_value in eval_result.items()])
+                )
+                eval_loss, precision = eval_result['eval_loss'], eval_result['precision']
                 if eval_loss > best_model['eval_loss']:
-                    # best_path = glob.glob(rec_train_options['checkpoint_save_dir'] + '/Best_*.pth')
-                    # for b_path in best_path:
-                    #     if os.path.exists(b_path):
-                    #         os.remove(b_path)
                     best_model['eval_loss'] = eval_loss
                     best_model['precision'] = precision
-                    best_model['f1'] = f1
                     best_model['models'] = net_save_path
                     save_checkpoint(net_save_path, net, _solvers, epoch, logger)
-                    # best_save_path = '{}/Best_{}_r{:.6f}_p{:.6f}_f1{:.6f}.pth'.format(
-                    #     rec_train_options['checkpoint_save_dir'], epoch,
-                    #     recall,
-                    #     precision,
-                    #     f1)
-                    # if os.path.exists(net_save_path):
-                    #     shutil.copyfile(net_save_path, best_save_path)
-                    # else:
-                    #     save_checkpoint(best_save_path, net, solver, epoch, logger)
-                    #
-                    # pse_path = glob.glob(rec_train_options['checkpoint_save_dir'] + '/PSENet_*.pth')
-                    # for p_path in pse_path:
-                    #     if os.path.exists(p_path):
-                    #         os.remove(p_path)
-            # # 保存ckpt
-            # # operation for model save as parameter ckpt_save_type is  HighestAcc
-            # min_loss = save_model_logic(total_loss, total_num, min_loss, net, epoch, rec_train_options, logger)
             [_scheduler.step() for _scheduler in schedulers]
 
     except KeyboardInterrupt:
@@ -508,7 +487,8 @@ def main():
     train_loader, eval_loader = get_data_loader(cfg['dataset'])
 
     # ===> train
-    train(net, solvers, schedulers, loss_func, train_loader, eval_loader, to_use_device, rec_train_options,current_epoch, logger)
+    train(net, solvers, schedulers, loss_func, train_loader, eval_loader, to_use_device, rec_train_options,
+          current_epoch, logger, cfg['loss']['blank_idx'])
 
 
 if __name__ == '__main__':
