@@ -10,6 +10,7 @@ class CTCLoss(nn.Module):
 
     def forward(self, pred, args):
         label, label_length = args[0], args[1]
+        pred = pred.log_softmax(2)
         pred = pred.transpose(0,1)
         batch_size = label.size(0)
         pred_size = torch.LongTensor([pred.size(0)] * batch_size)
